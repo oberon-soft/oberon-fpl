@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import structlog
 
-from fpl import db
+from fpl import db, holdings
 from fpl.client import FPLClient, FPLError, assert_bootstrap_sane, bootstrap_is_informative
+from fpl.config import CONFIG
+from fpl.entry import load_squad
 from fpl.freshness import Source, Status
 from fpl.phase import derive_phase
 
@@ -53,6 +55,13 @@ def run() -> int:
             n_fixtures = 0
 
         state = derive_phase(boot["events"])
+
+        # Own-squad state is ingestion, not decision. Keeping it here means
+        # seeding happens on the daily job the moment picks become public --
+        # a few hours after a deadline -- rather than waiting for a phase the
+        # decide job happens to consider actionable.
+        synced = _sync_own_squad(conn, client, boot, state)
+
         db.log_event(
             conn,
             "ingest",
@@ -62,6 +71,7 @@ def run() -> int:
                 "phase": str(state.phase),
                 "next_gameweek": state.next_gameweek,
                 "informative": informative,
+                "holdings_synced": synced,
             },
         )
 
@@ -72,5 +82,51 @@ def run() -> int:
             phase=str(state.phase),
             next_gameweek=state.next_gameweek,
             informative=informative,
+            holdings_synced=synced,
         )
     return 0
+
+
+def _sync_own_squad(conn, client, boot, state) -> bool:
+    """Record the last confirmed squad and price any arrivals.
+
+    Picks become public at a deadline, so the newest readable squad is the most
+    recent gameweek whose deadline has passed. Returns whether anything was
+    synced -- false before the first deadline, which is not a failure.
+    """
+    if not CONFIG.entry_id:
+        return False
+
+    settled = [
+        e for e in boot["events"]
+        if state.next_gameweek is None or e["id"] < state.next_gameweek
+    ]
+    if not settled:
+        return False
+    latest = max(e["id"] for e in settled)
+
+    transfer_cap = 1 + boot["game_settings"]["max_extra_free_transfers"]
+    try:
+        squad = load_squad(client, CONFIG.entry_id, latest, transfer_cap=transfer_cap)
+    except FPLError as exc:
+        log.warning("own_squad_fetch_failed", error=str(exc))
+        return False
+    if squad is None:
+        return False
+
+    deadline = next(
+        (e["deadline_time"] for e in boot["events"] if e["id"] == latest), None
+    )
+    from datetime import datetime
+
+    holdings.sync(
+        conn,
+        entry_id=CONFIG.entry_id,
+        event=latest,
+        picks=squad.picks_raw,
+        deadline_date=datetime.fromisoformat(deadline.replace("Z", "+00:00")).date(),
+        now_costs={e["id"]: e["now_cost"] for e in boot["elements"]},
+        reported_value=squad.value,
+    )
+    db.record_freshness(conn, Source.OWN_SQUAD, Status.FRESH)
+    return True

@@ -33,7 +33,9 @@ log = structlog.get_logger()
 #: Phases in which a recommendation is worth producing at all. Outside these the
 #: job exits immediately -- there is nothing to decide while a gameweek is in
 #: progress or its stats are still settling.
-ACTIONABLE = frozenset({Phase.PRE_DEADLINE, Phase.NEWS_WINDOW, Phase.PRESEASON})
+ACTIONABLE = frozenset(
+    {Phase.PRE_DEADLINE, Phase.NEWS_WINDOW, Phase.PLANNING, Phase.PRESEASON}
+)
 
 
 def run(force: bool = False) -> int:
@@ -104,24 +106,15 @@ def run(force: bool = False) -> int:
                 current = replace(current, holdings_at_current_price=held_now)
                 db.record_freshness(conn, Source.OWN_SQUAD, Status.FRESH)
 
-                # Price any arrivals from the snapshot taken at their deadline,
-                # then reconcile against FPL's published value. Seeding is
-                # time-sensitive: a purchase price is knowable exactly only at
-                # the moment of purchase, and inference afterwards.
-                sell_costs, reconciliation = holdings.sync(
-                    conn,
-                    entry_id=CONFIG.entry_id,
-                    event=event - 1,
-                    picks=current.picks_raw,
-                    deadline_date=_deadline_date(boot["events"], event - 1),
-                    now_costs={e["id"]: e["now_cost"] for e in boot["elements"]},
-                    reported_value=current.value,
-                )
-                if reconciliation.semantics is holdings.ValueSemantics.NET_OF_FEE:
-                    # The fee is real, so cost held players at what selling them
-                    # returns and budget from FPL's own figure.
-                    costs = sell_costs
-                    current = replace(current, holdings_at_current_price=None)
+                # Selling prices come from the holdings the ingest job
+                # maintains. Where a purchase price is known, cost the player at
+                # what selling them returns; the rest fall back to market, which
+                # is generous by at most half a rise.
+                held = db.load_holdings(conn, CONFIG.entry_id)
+                if held:
+                    costs = holdings.sell_prices(
+                        held, {e["id"]: e["now_cost"] for e in boot["elements"]}
+                    )
 
         recommendation = build(
             candidates,
@@ -168,13 +161,3 @@ def _latest_season(conn) -> str:
         """
     ).fetchone()
     return row["season_name"] if row else "__none__"
-
-
-def _deadline_date(events: list[dict], event: int):
-    """The date of a gameweek's deadline, for looking up the snapshot price."""
-    from datetime import datetime
-
-    for e in events:
-        if e["id"] == event:
-            return datetime.fromisoformat(e["deadline_time"].replace("Z", "+00:00")).date()
-    return None
