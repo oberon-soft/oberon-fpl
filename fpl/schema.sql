@@ -183,6 +183,46 @@ CREATE TABLE IF NOT EXISTS overrides (
     CONSTRAINT overrides_identifies_player CHECK (code IS NOT NULL OR web_name IS NOT NULL)
 );
 
+-- Purchase prices, and therefore selling prices.
+--
+-- The one piece of state the public API will not give you: `my-team` publishes
+-- selling prices but needs authentication. Reconstructed from a picks diff plus
+-- the daily price snapshots, and checked every gameweek against FPL's published
+-- `value`, which a correct set of purchase prices must reproduce exactly.
+--
+-- `confirmed` marks a purchase price the reconciliation has verified. Until
+-- then it is the best inference from the transfer window, and callers should
+-- prefer being generous over being tight -- a budget that is too conservative
+-- makes holding your own squad infeasible.
+CREATE TABLE IF NOT EXISTS squad_holdings (
+    entry_id        INTEGER     NOT NULL,
+    element_id      INTEGER     NOT NULL,
+    purchase_price  INTEGER     NOT NULL,
+    acquired_event  INTEGER     NOT NULL,
+    confirmed       BOOLEAN     NOT NULL DEFAULT false,
+    sold_event      INTEGER,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (entry_id, element_id, acquired_event)
+);
+
+CREATE INDEX IF NOT EXISTS squad_holdings_active_idx
+    ON squad_holdings (entry_id) WHERE sold_event IS NULL;
+
+-- Weekly reconciliation of our reconstruction against FPL's published value.
+-- Also settles, by observation, whether `value` is stated net of the sell-on
+-- fee at all -- a question that cannot be answered before a deadline passes.
+CREATE TABLE IF NOT EXISTS value_reconciliation (
+    entry_id        INTEGER     NOT NULL,
+    event           INTEGER     NOT NULL,
+    reported_value  INTEGER     NOT NULL,
+    market_total    INTEGER     NOT NULL,
+    selling_total   INTEGER     NOT NULL,
+    semantics       TEXT        NOT NULL,
+    agrees          BOOLEAN     NOT NULL,
+    checked_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (entry_id, event)
+);
+
 -- One row per source per run. The decide job reads the latest per source,
 -- derives the phase, and evaluates the tolerance table against these.
 CREATE TABLE IF NOT EXISTS source_freshness (

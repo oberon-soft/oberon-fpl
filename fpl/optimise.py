@@ -118,6 +118,7 @@ def solve(
     budget: int | None = None,
     chip: Chip = Chip.NONE,
     force_include: Iterable[int] = (),
+    costs: dict[int, int] | None = None,
 ) -> Solution:
     """Best squad under the rules.
 
@@ -147,7 +148,14 @@ def solve(
     current_ids = set(current)
     unlimited = chip in (Chip.WILDCARD, Chip.FREE_HIT) or not current_ids
 
-    cost = np.array([p.now_cost for p in candidates], dtype=float)
+    # Held players are costed at what selling them actually returns, which is
+    # below market once they have risen. Costing them at market while
+    # budgeting from FPL's `value` -- which is net of the fee -- makes the
+    # constraint tight enough to reject the squad you already own.
+    costs = costs or {}
+    cost = np.array(
+        [costs.get(p.element_id, p.now_cost) for p in candidates], dtype=float
+    )
     pos = np.array([p.element_type for p in candidates])
     team = np.array([p.team_id for p in candidates])
     horizon_ep = np.array([
