@@ -187,7 +187,24 @@ def test_email_is_sent_as_text_and_monospace_html():
     parts = {p.get_content_type() for p in msg.walk()}
     assert "text/plain" in parts and "text/html" in parts
     html = next(p for p in msg.walk() if p.get_content_type() == "text/html")
-    assert "<pre" in html.get_content() and "monospace" in html.get_content()
+    body = html.get_content()
+    assert "<pre" in body and "monospace" in body
+    assert "white-space:pre" in body
+
+
+def test_font_stack_starts_with_a_universally_supported_family():
+    """Mail clients sanitise CSS and several drop an entire font-family
+    declaration containing a token they do not recognise. A modern keyword
+    like ui-monospace can therefore cost you the whole declaration -- and the
+    symptom is subtle: numeric columns still align because they are
+    space-padded, but rows with accented names shift, because those glyphs are
+    not ASCII-width in a proportional font."""
+    from fpl.notify import _MONOSPACE
+
+    stack = _MONOSPACE.split("font-family:")[1].split(";")[0]
+    assert stack.split(",")[0].strip("'\"") == "Courier New"
+    assert "ui-monospace" not in _MONOSPACE
+    assert stack.split(",")[-1].strip() == "monospace"
 
 
 def test_email_escapes_html_in_the_body():
@@ -250,3 +267,19 @@ def test_discord_payload_is_truncated_to_the_limit():
     respx.post("https://discord.com/api/webhooks/x").mock(side_effect=record)
     notify.send_webhook("x" * 5000, title="T", url="https://discord.com/api/webhooks/x")
     assert len(captured["body"]) < 2100
+
+
+def test_style_attribute_is_not_broken_by_nested_quotes():
+    """The style string is interpolated into a double-quoted HTML attribute, so
+    a double-quoted font name terminates the attribute at the first quote and
+    discards everything after it. Silent, and it costs the whole declaration."""
+    from fpl.notify import _MONOSPACE, _build_email
+
+    assert '"' not in _MONOSPACE
+
+    msg = _build_email("a b", "T", "f@x", "t@y")
+    html = next(p for p in msg.walk() if p.get_content_type() == "text/html")
+    body = html.get_content()
+    style = body.split('style="')[1].split('"')[0]
+    assert style.endswith("margin:0"), f"attribute truncated: {style!r}"
+    assert "Courier New" in style

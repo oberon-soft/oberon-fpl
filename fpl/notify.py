@@ -63,6 +63,30 @@ def send_webhook(text: str, *, title: str, url: str) -> bool:
     return True
 
 
+#: Deliberately starts with Courier New rather than a modern keyword.
+#:
+#: Mail clients sanitise CSS, and several drop an entire `font-family`
+#: declaration when it contains a token they do not recognise -- `ui-monospace`
+#: is exactly such a token. Losing the declaration means no monospace at all,
+#: and the symptom is subtle rather than obvious: the numeric columns still line
+#: up, because they are padded with spaces, but any row containing an accented
+#: name (Gyokeres, Le Fee, Dubravka -- 43 of them in the current player pool)
+#: shifts, because those glyphs are not the same width as ASCII in a
+#: proportional font.
+#:
+#: `white-space: pre` is stated explicitly rather than relying on the `<pre>`
+#: element's default, since some clients normalise element styles away.
+#:
+#: The font name is single-quoted because this string is interpolated into a
+#: double-quoted HTML attribute. Double quotes here terminate the attribute at
+#: the first one and silently discard the rest of the declaration -- the same
+#: class of failure as the unrecognised keyword, arrived at differently.
+_MONOSPACE = (
+    "font-family:'Courier New',Courier,monospace;"
+    "font-size:13px;line-height:1.4;white-space:pre;margin:0"
+)
+
+
 def _build_email(text: str, title: str, sender: str, recipient: str) -> EmailMessage:
     """Plain text plus a monospace HTML alternative.
 
@@ -82,8 +106,7 @@ def _build_email(text: str, title: str, sender: str, recipient: str) -> EmailMes
     )
     message.add_alternative(
         "<html><body>"
-        '<pre style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;'
-        'font-size:13px;line-height:1.45">'
+        f'<pre style="{_MONOSPACE}">'
         f"{escaped}"
         "</pre></body></html>",
         subtype="html",
