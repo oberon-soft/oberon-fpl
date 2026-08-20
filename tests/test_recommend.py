@@ -166,19 +166,64 @@ def test_chip_shown_in_the_header(rules: Rules):
 # -- notification ---------------------------------------------------------
 
 
-def test_without_a_webhook_it_logs_rather_than_failing():
+def test_without_any_channel_it_logs_rather_than_failing(monkeypatch):
+    for var in ("FPL_SMTP_HOST", "FPL_EMAIL_TO", "FPL_WEBHOOK_URL"):
+        monkeypatch.delenv(var, raising=False)
     assert notify.send("body", title="t", url=None) is False
 
 
+def test_email_needs_both_host_and_recipient(monkeypatch):
+    monkeypatch.setenv("FPL_SMTP_HOST", "smtp.test")
+    monkeypatch.delenv("FPL_EMAIL_TO", raising=False)
+    assert notify.send_email("body", title="t") is False
+
+
+def test_email_is_sent_as_text_and_monospace_html():
+    """The squad table is column-aligned. Mail clients default to a proportional
+    font, which turns it into a jumble, so the HTML alternative wraps it in
+    <pre> -- the difference between readable on a phone and not."""
+    msg = notify._build_email("a  b\nc  d", "Title", "from@x", "to@y")
+    assert msg["Subject"] == "Title"
+    parts = {p.get_content_type() for p in msg.walk()}
+    assert "text/plain" in parts and "text/html" in parts
+    html = next(p for p in msg.walk() if p.get_content_type() == "text/html")
+    assert "<pre" in html.get_content() and "monospace" in html.get_content()
+
+
+def test_email_escapes_html_in_the_body():
+    """Player names and notes are interpolated; a stray angle bracket must not
+    break the markup."""
+    msg = notify._build_email("<script>x</script> & 5>3", "T", "f@x", "t@y")
+    html = next(p for p in msg.walk() if p.get_content_type() == "text/html")
+    body = html.get_content()
+    assert "&lt;script&gt;" in body and "&amp;" in body
+    assert "<script>" not in body
+
+
+def test_smtp_failure_never_raises(monkeypatch):
+    import smtplib
+
+    monkeypatch.setenv("FPL_SMTP_HOST", "smtp.invalid.test")
+    monkeypatch.setenv("FPL_EMAIL_TO", "to@y")
+
+    def boom(*a, **k):
+        raise smtplib.SMTPException("relay down")
+
+    monkeypatch.setattr(smtplib, "SMTP", boom)
+    assert notify.send_email("body", title="t") is False
+
+
 @respx.mock
-def test_webhook_receives_the_text():
+def test_webhook_receives_the_text(monkeypatch):
+    monkeypatch.delenv("FPL_SMTP_HOST", raising=False)
     route = respx.post("https://example.test/hook").mock(return_value=httpx.Response(204))
     assert notify.send("the body", title="Title", url="https://example.test/hook") is True
     assert route.called
 
 
 @respx.mock
-def test_delivery_failure_never_raises():
+def test_delivery_failure_never_raises(monkeypatch):
+    monkeypatch.delenv("FPL_SMTP_HOST", raising=False)
     """The recommendation is already durable in Postgres. Losing the message is a
     smaller problem than a CrashLoopBackOff that stops tomorrow's ingest."""
     respx.post("https://example.test/hook").mock(side_effect=httpx.ConnectError("down"))
@@ -186,7 +231,8 @@ def test_delivery_failure_never_raises():
 
 
 @respx.mock
-def test_rejected_delivery_never_raises():
+def test_rejected_delivery_never_raises(monkeypatch):
+    monkeypatch.delenv("FPL_SMTP_HOST", raising=False)
     respx.post("https://example.test/hook").mock(return_value=httpx.Response(403))
     assert notify.send("body", title="t", url="https://example.test/hook") is False
 
@@ -202,5 +248,5 @@ def test_discord_payload_is_truncated_to_the_limit():
         return httpx.Response(204)
 
     respx.post("https://discord.com/api/webhooks/x").mock(side_effect=record)
-    notify.send("x" * 5000, title="T", url="https://discord.com/api/webhooks/x")
+    notify.send_webhook("x" * 5000, title="T", url="https://discord.com/api/webhooks/x")
     assert len(captured["body"]) < 2100
