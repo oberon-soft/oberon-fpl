@@ -77,6 +77,25 @@ CREATE TABLE IF NOT EXISTS player_gameweeks (
     PRIMARY KEY (season, event, code)
 );
 
+-- Prior-season totals from element-summary's `history_past`.
+--
+-- This is the durable source for player rates. `bootstrap-static` carries the
+-- same per-90 figures right now, but only because it has not reset yet -- those
+-- fields hold last season's values until the opening kickoff and then zero out.
+-- Keyed on `code` so it survives element_id reassignment between seasons.
+CREATE TABLE IF NOT EXISTS player_seasons (
+    code            INTEGER     NOT NULL,
+    season_name     TEXT        NOT NULL,
+    minutes         INTEGER     NOT NULL,
+    starts          INTEGER     NOT NULL,
+    total_points    INTEGER     NOT NULL,
+    payload         JSONB       NOT NULL,
+    fetched_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (code, season_name)
+);
+
+CREATE INDEX IF NOT EXISTS player_seasons_season_idx ON player_seasons (season_name);
+
 -- Every projection we ever made, stamped with the model version that made it.
 -- This is the whole validation harness: actuals arrive a few days later and the
 -- comparison against `ep_next`, price and prior-season PPG tells us whether the
@@ -93,6 +112,10 @@ CREATE TABLE IF NOT EXISTS projections (
     now_cost        INTEGER     NOT NULL,
     baseline_ep_next NUMERIC(6,2),
     baseline_ppg    NUMERIC(6,3),
+    -- True when rates came from the price prior rather than observed play.
+    -- Scored separately: imputed projections are a different claim about the
+    -- world and deserve their own accuracy number.
+    imputed         BOOLEAN     NOT NULL DEFAULT false,
     PRIMARY KEY (model_version, event, code, made_at)
 );
 

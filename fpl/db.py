@@ -200,3 +200,168 @@ def log_event(conn: psycopg.Connection, event_type: str, payload: dict[str, Any]
         "INSERT INTO events (event_type, payload) VALUES (%s, %s)",
         (event_type, Jsonb(payload)),
     )
+
+
+# -- prior-season totals --------------------------------------------------
+
+
+def write_player_seasons(conn: psycopg.Connection, rows: list[tuple[int, dict[str, Any]]]) -> int:
+    """Store `history_past` entries. Keyed on code, so re-fetching is a no-op."""
+    payload = [
+        (
+            code, s["season_name"], s.get("minutes") or 0, s.get("starts") or 0,
+            s.get("total_points") or 0, Jsonb(s),
+        )
+        for code, s in rows
+    ]
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO player_seasons (code, season_name, minutes, starts, total_points, payload)
+            VALUES (%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (code, season_name) DO UPDATE SET
+                minutes = EXCLUDED.minutes,
+                starts = EXCLUDED.starts,
+                total_points = EXCLUDED.total_points,
+                payload = EXCLUDED.payload,
+                fetched_at = now()
+            """,
+            payload,
+        )
+    return len(payload)
+
+
+def load_player_seasons(conn: psycopg.Connection, season: str) -> dict[int, dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT code, payload FROM player_seasons WHERE season_name = %s", (season,)
+    ).fetchall()
+    return {r["code"]: r["payload"] for r in rows}
+
+
+def codes_missing_history(conn: psycopg.Connection, codes: list[int]) -> list[int]:
+    """Which players we have never fetched history for.
+
+    Absence of a row is ambiguous -- a genuine Premier League debutant has no
+    history to store -- so this is paired with a marker row rather than retried
+    forever. See `mark_history_fetched`.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT code FROM player_seasons WHERE code = ANY(%s)", (codes,)
+    ).fetchall()
+    seen = {r["code"] for r in rows}
+    return [c for c in codes if c not in seen]
+
+
+def mark_history_fetched(conn: psycopg.Connection, codes: list[int]) -> None:
+    """Record that a player was checked and genuinely has no prior season.
+
+    Without this, every debutant is re-fetched on every run forever -- 138 wasted
+    requests a day at the start of this season.
+    """
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO player_seasons (code, season_name, minutes, starts, total_points, payload)
+            VALUES (%s, '__none__', 0, 0, 0, '{}'::jsonb)
+            ON CONFLICT (code, season_name) DO NOTHING
+            """,
+            [(c,) for c in codes],
+        )
+
+
+# -- overrides ------------------------------------------------------------
+
+
+def load_overrides(conn: psycopg.Connection, event: int) -> dict[str, dict[str, Any]]:
+    """Active overrides, keyed by web_name.
+
+    Matched on name rather than code because that is what you have to hand when
+    entering one under time pressure. `code` is stored when known and wins if
+    both are present.
+    """
+    rows = conn.execute(
+        """
+        SELECT code, web_name, miss_events, ep_multiplier, reason
+        FROM overrides
+        WHERE expires_after IS NULL OR expires_after >= %s
+        """,
+        (event,),
+    ).fetchall()
+    return {
+        (r["web_name"] or str(r["code"])): {
+            "code": r["code"],
+            "miss_events": set(r["miss_events"] or []),
+            "ep_multiplier": float(r["ep_multiplier"]) if r["ep_multiplier"] is not None else None,
+            "reason": r["reason"],
+        }
+        for r in rows
+    }
+
+
+# -- projections ----------------------------------------------------------
+
+
+def write_projections(
+    conn: psycopg.Connection,
+    model_version: str,
+    rows: list[dict[str, Any]],
+) -> int:
+    """Append this run's projections.
+
+    Never updated. Each run is a separate record of what the model believed at a
+    point in time, which is the entire validation harness: actuals arrive days
+    later and the comparison against ep_next, price and prior-season PPG says
+    whether there is any edge. Because these were written before the outcome
+    existed, lookahead is structurally impossible.
+    """
+    payload = [
+        (
+            model_version, r["event"], r["code"], r["element_id"], r["ep"],
+            r["ep_horizon"], r["now_cost"], r["baseline_ep_next"], r["baseline_ppg"],
+            r["imputed"],
+        )
+        for r in rows
+    ]
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO projections (model_version, event, code, element_id, ep,
+                ep_horizon, now_cost, baseline_ep_next, baseline_ppg, imputed)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT DO NOTHING
+            """,
+            payload,
+        )
+    return len(payload)
+
+
+def latest_snapshot(conn: psycopg.Connection) -> list[dict[str, Any]]:
+    """Most recent player snapshot, one row per player."""
+    return conn.execute(
+        """
+        SELECT DISTINCT ON (element_id) element_id, code, web_name, team_id,
+               element_type, now_cost, status, chance_next, ep_next, payload
+        FROM player_snapshots
+        ORDER BY element_id, captured_on DESC
+        """
+    ).fetchall()
+
+
+def fixture_difficulties(conn: psycopg.Connection, events: list[int]) -> dict[int, list[tuple[int, int]]]:
+    """Team id -> [(gameweek, difficulty)] over the given gameweeks."""
+    rows = conn.execute(
+        """
+        SELECT event, team_h, team_a, team_h_difficulty, team_a_difficulty
+        FROM fixtures WHERE event = ANY(%s)
+        """,
+        (events,),
+    ).fetchall()
+    out: dict[int, list[tuple[int, int]]] = {}
+    for r in rows:
+        if r["team_h_difficulty"] is not None:
+            out.setdefault(r["team_h"], []).append((r["event"], r["team_h_difficulty"]))
+        if r["team_a_difficulty"] is not None:
+            out.setdefault(r["team_a"], []).append((r["event"], r["team_a_difficulty"]))
+    for team in out:
+        out[team].sort()
+    return out

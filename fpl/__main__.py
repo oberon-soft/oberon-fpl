@@ -53,6 +53,11 @@ def main(argv: list[str] | None = None) -> int:
             db.migrate(conn)
         return 0
 
+    if args.command == "plan":
+        from fpl.plan import run
+
+        return run()
+
     if args.command == "status":
         from fpl.status import run
 
