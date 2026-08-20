@@ -13,6 +13,8 @@ on a Friday, is worse than no recommendation at all.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import structlog
 
 from fpl import db, notify
@@ -90,6 +92,15 @@ def run(force: bool = False) -> int:
                 client, CONFIG.entry_id, event - 1, transfer_cap=transfer_cap
             )
             if current:
+                # Restate the budget in the same units the optimiser costs in.
+                # See Squad.budget: FPL's `value` is net of the sell-on fee, and
+                # mixing it with now_cost coefficients can make holding your own
+                # squad infeasible.
+                held_now = sum(
+                    e["now_cost"] for e in boot["elements"]
+                    if e["id"] in set(current.element_ids)
+                )
+                current = replace(current, holdings_at_current_price=held_now)
                 db.record_freshness(conn, Source.OWN_SQUAD, Status.FRESH)
 
         recommendation = build(

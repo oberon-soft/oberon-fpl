@@ -39,17 +39,39 @@ class Squad:
     free_transfers: int
     chips_used: list[str] = field(default_factory=list)
 
+    #: Sum of `now_cost` for the players currently held, supplied by the caller
+    #: because this module does not see the price table. Falls back to `value`
+    #: when unavailable, which is the conservative choice.
+    holdings_at_current_price: int | None = None
+
     @property
     def budget(self) -> int:
-        """What a replacement squad may cost.
+        """What a replacement squad may cost, valued at current prices.
 
-        Approximates each player's selling price as their current price, because
-        the 50% sell-on fee needs purchase prices and those are only exposed
-        through the authenticated `my-team` endpoint. The approximation is exact
-        for a squad bought at current prices and drifts as players rise, always
-        in the direction of overstating what you can afford -- so a recommendation
-        near the budget ceiling deserves a manual check.
+        The subtlety that makes this not simply `value + bank`: FPL's `value` is
+        the sum of *selling* prices, reduced by the 50% sell-on fee, while the
+        optimiser costs every candidate at `now_cost`. Mixing the two makes the
+        constraint too tight -- for a squad of risers, `sum(now_cost)` exceeds
+        `value`, and the solver would declare your own current squad infeasible
+        rather than offering to hold it.
+
+        So the budget is stated in the same units as the costs: current prices
+        of what you hold, plus the bank.
+
+        This is exact while you keep a player and slightly generous when you sell
+        one who has risen -- you are credited `now_cost` where FPL would pay the
+        selling price, an error of at most half the rise, rounded up. Generous
+        is the right direction to be wrong in here, because the alternative is a
+        solver that refuses to return any squad at all.
+
+        Exact selling prices need purchase prices, which only the authenticated
+        `my-team` endpoint publishes. They can be reconstructed instead: record
+        each player's price when they first appear in a picks diff, then use
+        `value` as a per-gameweek checksum, since a correct set of purchase
+        prices must reproduce it exactly.
         """
+        if self.holdings_at_current_price is not None:
+            return self.holdings_at_current_price + self.bank
         return self.value + self.bank
 
 

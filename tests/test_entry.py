@@ -160,3 +160,32 @@ def test_no_log_call_shadows_structlogs_reserved_key():
             if re.search(r"log\.(info|warning|error|debug)\(.*[,(]\s*event=", line):
                 offenders.append(f"{path}:{n}")
     assert not offenders, f"structlog reserved-key collision: {offenders}"
+
+
+def test_budget_uses_current_prices_when_supplied():
+    """FPL's `value` is net of the sell-on fee; the optimiser costs candidates at
+    now_cost. Stating the budget in selling prices while costing in current
+    prices makes the constraint too tight."""
+    squad = Squad(
+        entry_id=1, event=3, element_ids=[], captain=None, vice_captain=None,
+        bank=5, value=1000, free_transfers=1, holdings_at_current_price=1012,
+    )
+    assert squad.budget == 1017
+
+
+def test_holding_a_squad_of_risers_stays_feasible():
+    """The bug this guards. With value-based budgeting, a squad whose players
+    have all risen costs more at now_cost than `value` credits, so the solver
+    would reject the squad you already own."""
+    value_based = Squad(
+        entry_id=1, event=3, element_ids=list(range(15)), captain=None,
+        vice_captain=None, bank=0, value=1000, free_transfers=1,
+    )
+    current_based = Squad(
+        entry_id=1, event=3, element_ids=list(range(15)), captain=None,
+        vice_captain=None, bank=0, value=1000, free_transfers=1,
+        holdings_at_current_price=1014,
+    )
+    squad_at_now_cost = 1014
+    assert squad_at_now_cost > value_based.budget      # infeasible: the bug
+    assert squad_at_now_cost <= current_based.budget   # feasible: the fix
