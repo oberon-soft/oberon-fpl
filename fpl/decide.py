@@ -81,10 +81,11 @@ def run(force: bool = False) -> int:
             return 1
 
         current = None
-        if CONFIG.entry_id:
+        # The last confirmed squad is the previous gameweek's, since picks stay
+        # private until a deadline passes -- your own included. Before GW1 there
+        # is no previous gameweek to ask about, and event 0 is not a thing.
+        if CONFIG.entry_id and event > 1:
             transfer_cap = 1 + boot["game_settings"]["max_extra_free_transfers"]
-            # The last confirmed squad is the previous gameweek's, since picks
-            # stay private until a deadline passes.
             current = load_squad(
                 client, CONFIG.entry_id, event - 1, transfer_cap=transfer_cap
             )
