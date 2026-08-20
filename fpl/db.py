@@ -365,3 +365,30 @@ def fixture_difficulties(conn: psycopg.Connection, events: list[int]) -> dict[in
     for team in out:
         out[team].sort()
     return out
+
+
+# -- recommendations ------------------------------------------------------
+
+
+def write_recommendation(
+    conn: psycopg.Connection, model_version: str, payload: dict[str, Any]
+) -> int:
+    """Persist before notifying.
+
+    Order matters: the database write is the durable record, the message is a
+    convenience. A webhook that has rotated must not lose the recommendation.
+    """
+    row = conn.execute(
+        """
+        INSERT INTO recommendations (model_version, event, verdict, kind, payload)
+        VALUES (%s, %s, %s, %s, %s) RETURNING id
+        """,
+        (model_version, payload["event"], payload["verdict"], payload["kind"], Jsonb(payload)),
+    ).fetchone()
+    return row["id"]
+
+
+def mark_notified(conn: psycopg.Connection, recommendation_id: int) -> None:
+    conn.execute(
+        "UPDATE recommendations SET notified_at = now() WHERE id = %s", (recommendation_id,)
+    )

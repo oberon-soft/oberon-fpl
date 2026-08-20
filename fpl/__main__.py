@@ -33,8 +33,13 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("ingest", help="snapshot bootstrap-static and fixtures")
-    sub.add_parser("plan", help="refit rates and draft a plan (Phase 2/3)")
-    sub.add_parser("decide", help="produce the recommendation to act on (Phase 4)")
+    sub.add_parser("plan", help="refit rates and project expected points")
+    decide = sub.add_parser("decide", help="produce the recommendation to act on")
+    decide.add_argument(
+        "--force", action="store_true",
+        help="ignore the phase and freshness gates; for inspecting what the "
+             "model currently thinks, never for acting on",
+    )
     sub.add_parser("migrate", help="apply the schema and exit")
     sub.add_parser("status", help="print the derived phase and freshness verdict")
 
@@ -52,6 +57,11 @@ def main(argv: list[str] | None = None) -> int:
         with db.connect() as conn:
             db.migrate(conn)
         return 0
+
+    if args.command == "decide":
+        from fpl.decide import run
+
+        return run(force=args.force)
 
     if args.command == "plan":
         from fpl.plan import run
