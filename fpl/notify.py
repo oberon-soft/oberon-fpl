@@ -63,37 +63,19 @@ def send_webhook(text: str, *, title: str, url: str) -> bool:
     return True
 
 
-#: Deliberately starts with Courier New rather than a modern keyword.
-#:
-#: Mail clients sanitise CSS, and several drop an entire `font-family`
-#: declaration when it contains a token they do not recognise -- `ui-monospace`
-#: is exactly such a token. Losing the declaration means no monospace at all,
-#: and the symptom is subtle rather than obvious: the numeric columns still line
-#: up, because they are padded with spaces, but any row containing an accented
-#: name (Gyokeres, Le Fee, Dubravka -- 43 of them in the current player pool)
-#: shifts, because those glyphs are not the same width as ASCII in a
-#: proportional font.
-#:
-#: `white-space: pre` is stated explicitly rather than relying on the `<pre>`
-#: element's default, since some clients normalise element styles away.
-#:
-#: The font name is single-quoted because this string is interpolated into a
-#: double-quoted HTML attribute. Double quotes here terminate the attribute at
-#: the first one and silently discard the rest of the declaration -- the same
-#: class of failure as the unrecognised keyword, arrived at differently.
-_MONOSPACE = (
-    "font-family:'Courier New',Courier,monospace;"
-    "font-size:13px;line-height:1.4;white-space:pre;margin:0"
-)
+def _build_email(
+    text: str, title: str, sender: str, recipient: str, html: str | None = None
+) -> EmailMessage:
+    """Plain text, with an HTML alternative when one is supplied.
 
+    The HTML is built by `recommend.render_html` as a real table rather than a
+    monospace block. Two rounds of font fixes failed to align the columns:
+    clients sanitise CSS unpredictably, and a discarded font-family is invisible
+    until an accented name shifts a row. Tables do not depend on the renderer
+    agreeing about fonts.
 
-def _build_email(text: str, title: str, sender: str, recipient: str) -> EmailMessage:
-    """Plain text plus a monospace HTML alternative.
-
-    The squad table is column-aligned, and mail clients render plain text in a
-    proportional font by default, which turns it into a jumble. The `<pre>`
-    alternative is the difference between a readable recommendation and one you
-    have to squint at on a phone.
+    Without HTML this falls back to wrapping the text in <pre>, which is still
+    better than nothing for clients that show the plain part.
     """
     message = EmailMessage()
     message["Subject"] = title
@@ -101,20 +83,18 @@ def _build_email(text: str, title: str, sender: str, recipient: str) -> EmailMes
     message["To"] = recipient
     message.set_content(text)
 
-    escaped = (
-        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    )
-    message.add_alternative(
-        "<html><body>"
-        f'<pre style="{_MONOSPACE}">'
-        f"{escaped}"
-        "</pre></body></html>",
-        subtype="html",
-    )
+    if html is None:
+        escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        html = (
+            "<pre style=\"font-family:'Courier New',Courier,monospace;"
+            'font-size:13px;line-height:1.4;white-space:pre;margin:0">'
+            f"{escaped}</pre>"
+        )
+    message.add_alternative(f"<html><body>{html}</body></html>", subtype="html")
     return message
 
 
-def send_email(text: str, *, title: str) -> bool:
+def send_email(text: str, *, title: str, html: str | None = None) -> bool:
     host = os.environ.get(SMTP_HOST_ENV)
     recipient = os.environ.get(EMAIL_TO_ENV)
     if not host or not recipient:
@@ -130,7 +110,7 @@ def send_email(text: str, *, title: str) -> bool:
             smtp.starttls()
             if user and password:
                 smtp.login(user, password)
-            smtp.send_message(_build_email(text, title, sender, recipient))
+            smtp.send_message(_build_email(text, title, sender, recipient, html))
     except (smtplib.SMTPException, OSError) as exc:
         log.warning("email_failed", error=str(exc))
         return False
@@ -139,7 +119,7 @@ def send_email(text: str, *, title: str) -> bool:
     return True
 
 
-def send(text: str, *, title: str, url: str | None = None) -> bool:
+def send(text: str, *, title: str, url: str | None = None, html: str | None = None) -> bool:
     """Deliver the recommendation. Returns whether it reached anywhere.
 
     Tries email first, then a webhook, then logs. Never raises: the
@@ -147,7 +127,7 @@ def send(text: str, *, title: str, url: str | None = None) -> bool:
     losing a message is a far smaller problem than a CrashLoopBackOff that stops
     tomorrow's ingest -- the one job whose data cannot be recovered.
     """
-    delivered = send_email(text, title=title)
+    delivered = send_email(text, title=title, html=html)
 
     url = url or os.environ.get(WEBHOOK_ENV)
     if url:

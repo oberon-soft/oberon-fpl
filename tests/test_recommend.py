@@ -192,19 +192,58 @@ def test_email_is_sent_as_text_and_monospace_html():
     assert "white-space:pre" in body
 
 
-def test_font_stack_starts_with_a_universally_supported_family():
-    """Mail clients sanitise CSS and several drop an entire font-family
-    declaration containing a token they do not recognise. A modern keyword
-    like ui-monospace can therefore cost you the whole declaration -- and the
-    symptom is subtle: numeric columns still align because they are
-    space-padded, but rows with accented names shift, because those glyphs are
-    not ASCII-width in a proportional font."""
-    from fpl.notify import _MONOSPACE
+def test_html_body_is_a_table_not_a_monospace_block(rules: Rules):
+    """Two rounds of font fixes failed to align the columns, because clients
+    sanitise CSS unpredictably and a discarded font-family is invisible until an
+    accented name shifts a row. Real table cells do not depend on the renderer
+    agreeing about fonts."""
+    from fpl.recommend import render_html
 
-    stack = _MONOSPACE.split("font-family:")[1].split(";")[0]
-    assert stack.split(",")[0].strip("'\"") == "Courier New"
-    assert "ui-monospace" not in _MONOSPACE
-    assert stack.split(",")[-1].strip() == "monospace"
+    html = render_html(build_for(make_pool(60), rules))
+    assert "<table" in html and "<td" in html
+    assert "<pre" not in html
+    assert "monospace" not in html
+
+
+def test_html_uses_only_inline_styles(rules: Rules):
+    """No stylesheet survives an email client, and several strip <style> blocks
+    entirely."""
+    from fpl.recommend import render_html
+
+    html = render_html(build_for(make_pool(61), rules))
+    assert "<style" not in html and "class=" not in html
+    assert "display:flex" not in html and "display:grid" not in html
+
+
+def test_html_lists_the_whole_squad_with_the_captain_marked(rules: Rules):
+    from fpl.recommend import render_html
+
+    rec = build_for(make_pool(62), rules)
+    html = render_html(rec)
+    for p in rec.solution.squad:
+        assert p.web_name in html
+    assert "(C)" in html
+
+
+def test_html_escapes_player_names(rules: Rules):
+    """Names are interpolated straight into markup; one stray bracket would
+    break the table."""
+    from fpl.project import Projection
+    from fpl.recommend import render_html
+
+    pool = make_pool(63)
+    pool[0] = Projection(**{**pool[0].__dict__, "web_name": "<b>x</b> & co"})
+    html = render_html(build_for(pool, rules))
+    assert "<b>x</b>" not in html
+    assert "&lt;b&gt;" in html or "<b>x</b> & co" not in html
+
+
+def test_html_states_the_action_before_the_squad(rules: Rules):
+    """The action is the message. Everything below it is supporting detail."""
+    from fpl.recommend import render_html
+
+    html = render_html(build_for(make_pool(64), rules))
+    assert html.index("squad selection") < html.index("<table")
 
 
 def test_email_escapes_html_in_the_body():
@@ -269,17 +308,24 @@ def test_discord_payload_is_truncated_to_the_limit():
     assert len(captured["body"]) < 2100
 
 
-def test_style_attribute_is_not_broken_by_nested_quotes():
-    """The style string is interpolated into a double-quoted HTML attribute, so
-    a double-quoted font name terminates the attribute at the first quote and
-    discards everything after it. Silent, and it costs the whole declaration."""
-    from fpl.notify import _MONOSPACE, _build_email
+def test_supplied_html_is_used_verbatim():
+    """The renderer owns the markup; notify must not re-wrap or re-escape it."""
+    from fpl.notify import _build_email
 
-    assert '"' not in _MONOSPACE
-
-    msg = _build_email("a b", "T", "f@x", "t@y")
+    msg = _build_email("plain", "T", "f@x", "t@y", html="<table><tr><td>x</td></tr></table>")
     html = next(p for p in msg.walk() if p.get_content_type() == "text/html")
-    body = html.get_content()
-    style = body.split('style="')[1].split('"')[0]
+    assert "<table><tr><td>x</td></tr></table>" in html.get_content()
+
+
+def test_fallback_pre_style_survives_the_html_attribute():
+    """Without a rendered body, notify wraps the text in <pre>. The font name is
+    single-quoted because the style is interpolated into a double-quoted
+    attribute -- double quotes there terminate it at the first one and silently
+    discard the rest of the declaration."""
+    from fpl.notify import _build_email
+
+    msg = _build_email("a  b", "T", "f@x", "t@y")
+    html = next(p for p in msg.walk() if p.get_content_type() == "text/html")
+    style = html.get_content().split('style="')[1].split('"')[0]
     assert style.endswith("margin:0"), f"attribute truncated: {style!r}"
     assert "Courier New" in style

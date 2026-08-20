@@ -236,3 +236,150 @@ def render(rec: Recommendation) -> str:
             lines.append(f"note: {note}")
 
     return "\n".join(lines)
+
+
+# -- HTML rendering -------------------------------------------------------
+#
+# Not a monospace <pre>. Two rounds of font fixes failed to align the columns,
+# because mail clients sanitise CSS unpredictably and a lost font-family is
+# invisible until an accented name shifts a row. Tables are the one layout
+# primitive email clients have handled reliably for twenty years, so the columns
+# are real cells and alignment stops depending on the renderer's font choice.
+#
+# Everything is inline-styled with no external stylesheet, no flexbox and no
+# grid, for the same reason.
+
+_CELL = "padding:3px 10px 3px 0;font-size:14px;border-bottom:1px solid #eee"
+_HEAD = "padding:0 10px 4px 0;font-size:11px;text-transform:uppercase;letter-spacing:.05em;opacity:.6;text-align:left"
+_NUM = "text-align:right;font-variant-numeric:tabular-nums"
+
+
+def _esc(value: object) -> str:
+    return (
+        str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+
+
+def _squad_table(rec: Recommendation) -> str:
+    sol = rec.solution
+    captain = sol.captains.get(rec.event)
+    rows: list[str] = [
+        "<tr>"
+        f'<th style="{_HEAD}"></th>'
+        f'<th style="{_HEAD}">Pos</th>'
+        f'<th style="{_HEAD}">Player</th>'
+        f'<th style="{_HEAD}">Team</th>'
+        f'<th style="{_HEAD};{_NUM}">£m</th>'
+        f'<th style="{_HEAD};{_NUM}">EP</th>'
+        "</tr>"
+    ]
+    for group, players in (("XI", sol.starting), ("Bench", sol.bench)):
+        for i, p in enumerate(players):
+            is_captain = captain is not None and p.element_id == captain.element_id
+            label = group if i == 0 else ""
+            name = _esc(p.web_name) + (
+                ' <strong style="color:#1a7f37">(C)</strong>' if is_captain else ""
+            )
+            dim = "" if group == "XI" else "opacity:.55;"
+            rows.append(
+                "<tr>"
+                f'<td style="{_CELL};{dim}font-size:11px;opacity:.5">{label}</td>'
+                f'<td style="{_CELL};{dim}">{_esc(rec.positions[p.element_type])}</td>'
+                f'<td style="{_CELL};{dim}">{name}</td>'
+                f'<td style="{_CELL};{dim}">{_esc(rec.teams[p.team_id])}</td>'
+                f'<td style="{_CELL};{_NUM};{dim}">{p.now_cost / 10:.1f}</td>'
+                f'<td style="{_CELL};{_NUM};{dim}">{p.ep_next:.2f}</td>'
+                "</tr>"
+            )
+    return (
+        '<table cellpadding="0" cellspacing="0" border="0" '
+        'style="border-collapse:collapse;width:100%;max-width:520px">'
+        + "".join(rows)
+        + "</table>"
+    )
+
+
+def render_html(rec: Recommendation) -> str:
+    """The recommendation as an email body.
+
+    Deliberately colour-light: mail clients invert dark mode unpredictably, so
+    the design leans on weight and spacing rather than background fills, and
+    specifies no page background at all.
+    """
+    sol = rec.solution
+    out: list[str] = [
+        '<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,'
+        'Helvetica,Arial,sans-serif;max-width:560px">'
+    ]
+
+    heading = f"GW{rec.event} &middot; {_esc(rec.kind)}"
+    if sol.chip is not Chip.NONE:
+        heading += f" &middot; {_esc(sol.chip)}"
+    out.append(f'<h2 style="margin:0 0 2px;font-size:19px">{heading}</h2>')
+
+    if rec.verdict is not Verdict.READY:
+        detail = _esc(rec.readiness.explain()) if rec.readiness else str(rec.verdict)
+        out.append(
+            '<p style="margin:8px 0;padding:8px 10px;border-left:3px solid #b45309;'
+            f'font-size:13px">{detail}</p>'
+        )
+
+    # The action, stated before anything else. This is the whole message.
+    if rec.current is None:
+        action = "Full squad selection — no confirmed squad yet."
+    elif rec.is_hold:
+        action = (
+            "<strong>Hold.</strong> No transfer worth making; bank the free "
+            f"transfer ({rec.current.free_transfers} available)."
+        )
+    else:
+        moves = " &nbsp;·&nbsp; ".join(
+            f"{_esc(o.web_name)} &rarr; <strong>{_esc(i.web_name)}</strong>"
+            for o, i in zip(sol.transfers_out, sol.transfers_in)
+        )
+        cost = f"−{sol.hit_cost} pts ({sol.hits} hit)" if sol.hits else "free"
+        action = f"{moves}<br><span style='opacity:.6'>Cost: {cost}</span>"
+    out.append(f'<p style="margin:10px 0 14px;font-size:15px">{action}</p>')
+
+    captain = sol.captains.get(rec.event)
+    if captain:
+        out.append(
+            '<p style="margin:0 0 14px;font-size:15px">Captain: '
+            f"<strong>{_esc(captain.web_name)}</strong> "
+            f'<span style="opacity:.6">({captain.ep_next:.2f} projected)</span></p>'
+        )
+
+    out.append(_squad_table(rec))
+    out.append(
+        '<p style="margin:12px 0 0;font-size:13px;opacity:.7">'
+        f"Spend {sol.spend / 10:.1f} &middot; {sol.objective:.1f} pts/gw projected "
+        "over the horizon</p>"
+    )
+
+    if len(sol.captains) > 1:
+        rota = ", ".join(
+            f"GW{gw} {_esc(p.web_name)}" for gw, p in sorted(sol.captains.items())
+        )
+        out.append(
+            f'<p style="margin:4px 0 0;font-size:13px;opacity:.7">Captain plan: {rota}</p>'
+        )
+
+    if rec.alternatives:
+        items = "".join(
+            f"<li>{_esc(name)} <span style='opacity:.6'>{delta:+.2f} pts/gw</span></li>"
+            for name, delta in rec.alternatives
+        )
+        out.append(
+            '<p style="margin:14px 0 4px;font-size:13px;font-weight:600">Next best</p>'
+            f'<ul style="margin:0;padding-left:18px;font-size:13px">{items}</ul>'
+        )
+
+    if rec.notes:
+        notes = "".join(f"<li>{_esc(n)}</li>" for n in rec.notes)
+        out.append(
+            '<ul style="margin:14px 0 0;padding-left:18px;font-size:12px;opacity:.65">'
+            f"{notes}</ul>"
+        )
+
+    out.append("</div>")
+    return "".join(out)

@@ -25,7 +25,7 @@ from fpl.freshness import Source, Status, Verdict, evaluate
 from fpl.optimise import Rules
 from fpl.phase import Phase, derive_phase
 from fpl.plan import build_projections
-from fpl.recommend import build, render
+from fpl.recommend import build, render, render_html
 from fpl.scoring import Scoring
 
 log = structlog.get_logger()
@@ -134,6 +134,7 @@ def run(force: bool = False) -> int:
 
         delivered = notify.send(
             text,
+            html=render_html(recommendation),
             title=f"FPL GW{event}: {'hold' if recommendation.is_hold else 'transfer'}",
         )
         if delivered:
