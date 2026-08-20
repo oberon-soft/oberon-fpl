@@ -17,7 +17,7 @@ from dataclasses import replace
 
 import structlog
 
-from fpl import db, notify
+from fpl import db, holdings, notify
 from fpl.client import FPLClient, FPLError
 from fpl.config import CONFIG, MODEL_VERSION
 from fpl.entry import load_squad
@@ -83,6 +83,7 @@ def run(force: bool = False) -> int:
             return 1
 
         current = None
+        costs: dict[int, int] = {}
         # The last confirmed squad is the previous gameweek's, since picks stay
         # private until a deadline passes -- your own included. Before GW1 there
         # is no previous gameweek to ask about, and event 0 is not a thing.
@@ -103,6 +104,25 @@ def run(force: bool = False) -> int:
                 current = replace(current, holdings_at_current_price=held_now)
                 db.record_freshness(conn, Source.OWN_SQUAD, Status.FRESH)
 
+                # Price any arrivals from the snapshot taken at their deadline,
+                # then reconcile against FPL's published value. Seeding is
+                # time-sensitive: a purchase price is knowable exactly only at
+                # the moment of purchase, and inference afterwards.
+                sell_costs, reconciliation = holdings.sync(
+                    conn,
+                    entry_id=CONFIG.entry_id,
+                    event=event - 1,
+                    picks=current.picks_raw,
+                    deadline_date=_deadline_date(boot["events"], event - 1),
+                    now_costs={e["id"]: e["now_cost"] for e in boot["elements"]},
+                    reported_value=current.value,
+                )
+                if reconciliation.semantics is holdings.ValueSemantics.NET_OF_FEE:
+                    # The fee is real, so cost held players at what selling them
+                    # returns and budget from FPL's own figure.
+                    costs = sell_costs
+                    current = replace(current, holdings_at_current_price=None)
+
         recommendation = build(
             candidates,
             rules,
@@ -113,6 +133,7 @@ def run(force: bool = False) -> int:
             positions={t["id"]: t["singular_name_short"] for t in boot["element_types"]},
             teams={t["id"]: t["short_name"] for t in boot["teams"]},
             current=current,
+            costs=costs,
         )
 
         text = render(recommendation)
@@ -147,3 +168,13 @@ def _latest_season(conn) -> str:
         """
     ).fetchone()
     return row["season_name"] if row else "__none__"
+
+
+def _deadline_date(events: list[dict], event: int):
+    """The date of a gameweek's deadline, for looking up the snapshot price."""
+    from datetime import datetime
+
+    for e in events:
+        if e["id"] == event:
+            return datetime.fromisoformat(e["deadline_time"].replace("Z", "+00:00")).date()
+    return None

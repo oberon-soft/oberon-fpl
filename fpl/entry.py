@@ -38,6 +38,9 @@ class Squad:
     value: int
     free_transfers: int
     chips_used: list[str] = field(default_factory=list)
+    #: The picks payload as returned, kept so holdings can diff arrivals
+    #: against the previous gameweek without a second fetch.
+    picks_raw: list[dict[str, Any]] = field(default_factory=list)
 
     #: Sum of `now_cost` for the players currently held, supplied by the caller
     #: because this module does not see the price table. Falls back to `value`
@@ -48,27 +51,22 @@ class Squad:
     def budget(self) -> int:
         """What a replacement squad may cost, valued at current prices.
 
-        The subtlety that makes this not simply `value + bank`: FPL's `value` is
-        the sum of *selling* prices, reduced by the 50% sell-on fee, while the
-        optimiser costs every candidate at `now_cost`. Mixing the two makes the
-        constraint too tight -- for a squad of risers, `sum(now_cost)` exceeds
-        `value`, and the solver would declare your own current squad infeasible
-        rather than offering to hold it.
+        This is the fallback, used only while purchase prices are unknown. Once
+        `holdings` has them, the caller costs held players at their selling price
+        and budgets from FPL's own figure instead, which is exact.
 
-        So the budget is stated in the same units as the costs: current prices
-        of what you hold, plus the bank.
+        The subtlety that makes this not simply `value + bank`: if FPL's `value`
+        is the sum of *selling* prices -- reduced by the 50% sell-on fee -- while
+        the optimiser costs every candidate at `now_cost`, the two are in
+        different units. For a squad of risers `sum(now_cost)` exceeds `value`,
+        so the squad you already own no longer fits its own budget.
 
-        This is exact while you keep a player and slightly generous when you sell
-        one who has risen -- you are credited `now_cost` where FPL would pay the
-        selling price, an error of at most half the rise, rounded up. Generous
-        is the right direction to be wrong in here, because the alternative is a
-        solver that refuses to return any squad at all.
-
-        Exact selling prices need purchase prices, which only the authenticated
-        `my-team` endpoint publishes. They can be reconstructed instead: record
-        each player's price when they first appear in a picks diff, then use
-        `value` as a per-gameweek checksum, since a correct set of purchase
-        prices must reproduce it exactly.
+        The solver does not object to that. There is always some cheaper legal
+        squad, so it quietly sells players to close the gap and presents those
+        sales as recommendations. Stating the budget at current prices avoids it:
+        exact while a player is held, and generous by at most half a rise when
+        one is sold. Generous is the right direction to be wrong, because being
+        tight invents transfers rather than refusing to answer.
         """
         if self.holdings_at_current_price is not None:
             return self.holdings_at_current_price + self.bank
@@ -134,4 +132,5 @@ def load_squad(
             history, cap=transfer_cap, current_event=event + 1
         ),
         chips_used=[c["name"] for c in history.get("chips", [])],
+        picks_raw=picks["picks"],
     )

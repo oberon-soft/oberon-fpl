@@ -392,3 +392,138 @@ def mark_notified(conn: psycopg.Connection, recommendation_id: int) -> None:
     conn.execute(
         "UPDATE recommendations SET notified_at = now() WHERE id = %s", (recommendation_id,)
     )
+
+
+# -- picks and holdings ---------------------------------------------------
+
+
+def write_entry_picks(
+    conn: psycopg.Connection, entry_id: int, event: int, picks: list[dict[str, Any]]
+) -> int:
+    rows = [
+        (
+            entry_id, event, p["element"], p["position"], p["multiplier"],
+            bool(p.get("is_captain")), bool(p.get("is_vice_captain")),
+        )
+        for p in picks
+    ]
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO entry_picks (entry_id, event, element_id, position,
+                multiplier, is_captain, is_vice_captain)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (entry_id, event, element_id) DO UPDATE SET
+                position = EXCLUDED.position,
+                multiplier = EXCLUDED.multiplier,
+                is_captain = EXCLUDED.is_captain,
+                is_vice_captain = EXCLUDED.is_vice_captain
+            """,
+            rows,
+        )
+    return len(rows)
+
+
+def previous_picks(conn: psycopg.Connection, entry_id: int, event: int) -> set[int]:
+    """The squad as at the most recent gameweek before `event` that we recorded.
+
+    Not simply `event - 1`: if a run was missed, the last squad we know about may
+    be older, and diffing against nothing would treat the whole squad as new
+    arrivals and overwrite good purchase prices.
+    """
+    row = conn.execute(
+        "SELECT max(event) AS e FROM entry_picks WHERE entry_id = %s AND event < %s",
+        (entry_id, event),
+    ).fetchone()
+    if not row or row["e"] is None:
+        return set()
+    rows = conn.execute(
+        "SELECT element_id FROM entry_picks WHERE entry_id = %s AND event = %s",
+        (entry_id, row["e"]),
+    ).fetchall()
+    return {r["element_id"] for r in rows}
+
+
+def price_on_or_before(
+    conn: psycopg.Connection, element_id: int, on_date: Any
+) -> int | None:
+    """A player's price from the nearest snapshot at or before a date.
+
+    This is what makes purchase prices recoverable at all: the daily snapshot is
+    the only record of what a player cost on the day they were bought, and the
+    API will never return it again.
+    """
+    row = conn.execute(
+        """
+        SELECT now_cost FROM player_snapshots
+        WHERE element_id = %s AND captured_on <= %s
+        ORDER BY captured_on DESC LIMIT 1
+        """,
+        (element_id, on_date),
+    ).fetchone()
+    return row["now_cost"] if row else None
+
+
+def record_holdings(
+    conn: psycopg.Connection, entry_id: int, rows: list[tuple[int, int, int]]
+) -> int:
+    """Store purchase prices. Never overwritten once set -- a purchase price is a
+    historical fact, and a later re-derivation is a worse estimate than the one
+    taken at the time."""
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO squad_holdings (entry_id, element_id, purchase_price, acquired_event)
+            VALUES (%s,%s,%s,%s)
+            ON CONFLICT (entry_id, element_id, acquired_event) DO NOTHING
+            """,
+            [(entry_id, e, p, gw) for e, p, gw in rows],
+        )
+    return len(rows)
+
+
+def mark_sold(
+    conn: psycopg.Connection, entry_id: int, element_ids: set[int], event: int
+) -> None:
+    if not element_ids:
+        return
+    conn.execute(
+        """
+        UPDATE squad_holdings SET sold_event = %s, updated_at = now()
+        WHERE entry_id = %s AND element_id = ANY(%s) AND sold_event IS NULL
+        """,
+        (event, entry_id, list(element_ids)),
+    )
+
+
+def load_holdings(conn: psycopg.Connection, entry_id: int) -> dict[int, int]:
+    """Purchase price per element for players currently held."""
+    rows = conn.execute(
+        """
+        SELECT element_id, purchase_price FROM squad_holdings
+        WHERE entry_id = %s AND sold_event IS NULL
+        """,
+        (entry_id,),
+    ).fetchall()
+    return {r["element_id"]: r["purchase_price"] for r in rows}
+
+
+def write_reconciliation(
+    conn: psycopg.Connection, entry_id: int, event: int, rec: Any
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO value_reconciliation (entry_id, event, reported_value,
+            market_total, selling_total, semantics, agrees)
+        VALUES (%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (entry_id, event) DO UPDATE SET
+            reported_value = EXCLUDED.reported_value,
+            market_total = EXCLUDED.market_total,
+            selling_total = EXCLUDED.selling_total,
+            semantics = EXCLUDED.semantics,
+            agrees = EXCLUDED.agrees,
+            checked_at = now()
+        """,
+        (entry_id, event, rec.reported_value, rec.market_total,
+         rec.selling_total, str(rec.semantics), rec.agrees),
+    )

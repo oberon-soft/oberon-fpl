@@ -90,6 +90,7 @@ def _alternatives(
     current: Sequence[int],
     free_transfers: int,
     budget: int,
+    costs: dict[int, int] | None = None,
     limit: int = 3,
 ) -> list[tuple[str, float]]:
     """What the next-best moves would have been, and by how much they lose.
@@ -106,7 +107,7 @@ def _alternatives(
     try:
         rival = solve(
             pool, rules, horizon=horizon, current=current,
-            free_transfers=free_transfers, budget=budget,
+            free_transfers=free_transfers, budget=budget, costs=costs,
         )
     except Exception:
         return []
@@ -130,6 +131,7 @@ def build(
     teams: dict[int, str],
     current: Squad | None = None,
     chip: Chip = Chip.NONE,
+    costs: dict[int, int] | None = None,
 ) -> Recommendation:
     current_ids = current.element_ids if current else []
     free_transfers = current.free_transfers if current else 1
@@ -137,12 +139,12 @@ def build(
 
     solution = solve(
         candidates, rules, horizon=horizon, current=current_ids,
-        free_transfers=free_transfers, budget=budget, chip=chip,
+        free_transfers=free_transfers, budget=budget, chip=chip, costs=costs,
     )
 
     alternatives = _alternatives(
         candidates, rules, solution, horizon=horizon, current=current_ids,
-        free_transfers=free_transfers, budget=budget,
+        free_transfers=free_transfers, budget=budget, costs=costs,
     )
 
     notes = list(solution.notes)

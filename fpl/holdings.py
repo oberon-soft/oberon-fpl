@@ -4,8 +4,9 @@ This is the one piece of state FPL will not hand you. The authenticated
 `my-team` endpoint publishes selling prices directly; the public API does not,
 so they have to be reconstructed -- and getting them wrong is not a rounding
 error. Cost a held player at their market price while budgeting from FPL's
-`value`, which is net of the sell-on fee, and the constraint becomes tight
-enough to declare the squad you already own infeasible.
+`value`, which is net of the sell-on fee, and the squad you already own no
+longer fits its own budget. The solver does not object: it quietly sells
+players to close the gap and presents those sales as recommendations.
 
 Reconstruction has two halves. Purchase prices come from a picks diff plus the
 daily price snapshots: a player first appearing in gameweek N was bought in the
@@ -158,3 +159,78 @@ def arrivals(previous: set[int], current: set[int]) -> set[int]:
     rather than inferred, which is why seeding must not be missed.
     """
     return current - previous
+
+
+def sync(
+    conn,
+    *,
+    entry_id: int,
+    event: int,
+    picks: list[dict[str, Any]],
+    deadline_date: Any,
+    now_costs: dict[int, int],
+    reported_value: int,
+) -> tuple[dict[int, int], Reconciliation]:
+    """Record this gameweek's squad, price any arrivals, and reconcile.
+
+    Returns the selling prices to cost held players at, and the reconciliation
+    that says whether to trust them.
+
+    Purchase prices are taken from the snapshot at the gameweek's deadline. A
+    player first appearing in gameweek N was bought between the previous deadline
+    and this one, and most transfers are made close to the deadline -- but the
+    real reason this works is that the snapshot exists at all. The API will never
+    tell you what a player cost last Tuesday.
+    """
+    from fpl import db
+
+    squad = {p["element"] for p in picks}
+    previous = db.previous_picks(conn, entry_id, event)
+    new = arrivals(previous, squad)
+    departed = previous - squad
+
+    db.write_entry_picks(conn, entry_id, event, picks)
+
+    priced: list[tuple[int, int, int]] = []
+    unpriced: list[int] = []
+    for element_id in sorted(new):
+        price = db.price_on_or_before(conn, element_id, deadline_date)
+        if price is None:
+            # No snapshot covers the window -- ingest was not running yet. Fall
+            # back to the current price, which understates any rise since
+            # purchase and so understates the selling price. Conservative, and
+            # the reconciliation will flag it.
+            price = now_costs.get(element_id)
+            if price is None:
+                unpriced.append(element_id)
+                continue
+            log.warning("purchase_price_inferred", element_id=element_id, gameweek=event)
+        priced.append((element_id, price, event))
+
+    if priced:
+        db.record_holdings(conn, entry_id, priced)
+    if departed:
+        db.mark_sold(conn, entry_id, departed, event)
+    if unpriced:
+        log.warning("purchase_price_unknown", elements=unpriced, gameweek=event)
+
+    held = db.load_holdings(conn, entry_id)
+    prices = sell_prices(held, now_costs)
+
+    market_total = sum(now_costs[e] for e in squad if e in now_costs)
+    # Players without a tracked purchase price contribute their market price,
+    # which is the same fallback the optimiser uses for them.
+    selling_total = sum(prices.get(e, now_costs.get(e, 0)) for e in squad)
+
+    rec = reconcile(reported_value, market_total, selling_total)
+    db.write_reconciliation(conn, entry_id, event, rec)
+    log.info(
+        "holdings_synced",
+        gameweek=event,
+        arrivals=len(priced),
+        departures=len(departed),
+        semantics=str(rec.semantics),
+        agrees=rec.agrees,
+        detail=rec.explain(),
+    )
+    return prices, rec
