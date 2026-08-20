@@ -1,0 +1,32 @@
+{
+  "new_entries": {
+    "has_next": false,
+    "page": 1,
+    "results": [
+      {"entry": 1000001, "entry_name": "Synthetic FC", "joined_time": "2026-08-10T13:04:06.000000Z", "player_first_name": "Ada", "player_last_name": "Example"},
+      {"entry": 1000002, "entry_name": "Placeholder Rovers", "joined_time": "2026-08-10T14:11:00.000000Z", "player_first_name": "Bo", "player_last_name": "Example"},
+      {"entry": 1000003, "entry_name": "Fixture United", "joined_time": "2026-08-11T09:30:00.000000Z", "player_first_name": "Cy", "player_last_name": "Example"}
+    ]
+  },
+  "last_updated_data": null,
+  "league": {
+    "id": 999999,
+    "name": "Test League",
+    "created": "2026-08-10T13:04:06.000000Z",
+    "closed": false,
+    "max_entries": null,
+    "league_type": "x",
+    "scoring": "c",
+    "admin_entry": 1000001,
+    "start_event": 1,
+    "code_privacy": "p",
+    "has_cup": true,
+    "cup_league": null,
+    "rank": null
+  },
+  "standings": {
+    "has_next": false,
+    "page": 1,
+    "results": []
+  }
+}

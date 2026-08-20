@@ -1,0 +1,70 @@
+name: Build and push image
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run tests
+        run: uv run pytest -v
+
+  build:
+    # Fork pull requests must never reach this job: it holds the registry token
+    # and the PAT that writes to oberon-bootstrap.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/oberon-soft/oberon-fpl:latest
+            ghcr.io/oberon-soft/oberon-fpl:${{ github.sha }}
+
+      - name: Check out oberon-bootstrap
+        uses: actions/checkout@v4
+        with:
+          repository: oberon-soft/oberon-bootstrap
+          token: ${{ secrets.BOOTSTRAP_PAT_2 }}
+          path: oberon-bootstrap
+
+      - name: Bump image tag
+        run: |
+          sed -i 's|ghcr.io/oberon-soft/oberon-fpl:.*|ghcr.io/oberon-soft/oberon-fpl:${{ github.sha }}|' \
+            oberon-bootstrap/fpl/cronjobs.yaml
+          cd oberon-bootstrap
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git commit -am "chore: bump fpl image to ${{ github.sha }}"
+          git push

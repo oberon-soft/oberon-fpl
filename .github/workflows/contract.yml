@@ -1,0 +1,48 @@
+name: API contract
+
+# The one workflow allowed to hit the live FPL API.
+#
+# Everything in the normal suite runs against recorded payloads, which means it
+# keeps passing after FPL changes the game. This catches that. It is scheduled
+# rather than gating, so a Premier League rule change does not block a deploy --
+# it just tells you loudly that the model's assumptions have drifted.
+#
+# It will fire eventually: defensive contribution and the price_change_* block
+# were both added recently.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Fetch live payloads
+        run: |
+          curl -sf -H "User-Agent: oberon-fpl-contract" \
+            https://fantasy.premierleague.com/api/bootstrap-static/ \
+            -o /tmp/live_bootstrap.json
+          curl -sf -H "User-Agent: oberon-fpl-contract" \
+            https://fantasy.premierleague.com/api/fixtures/ \
+            -o /tmp/live_fixtures.json
+
+      - name: Assert the rules we model still hold
+        run: uv run python -m tests.contract /tmp/live_bootstrap.json /tmp/live_fixtures.json
+
+      - name: Report drift
+        if: failure()
+        run: |
+          {
+            echo "## FPL API contract drift"
+            echo ""
+            echo "The live API no longer matches the assumptions this model is built on."
+            echo "Check the step above for which assertion failed, then update"
+            echo "\`fpl/config.py\` and re-record \`tests/fixtures/bootstrap.json\`."
+          } >> "$GITHUB_STEP_SUMMARY"
