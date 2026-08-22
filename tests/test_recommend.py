@@ -329,3 +329,71 @@ def test_fallback_pre_style_survives_the_html_attribute():
     style = html.get_content().split('style="')[1].split('"')[0]
     assert style.endswith("margin:0"), f"attribute truncated: {style!r}"
     assert "Courier New" in style
+
+
+# -- send suppression -----------------------------------------------------
+
+
+def _prev(kind: str, digest: dict) -> dict:
+    return {"kind": kind, "payload": {"digest": digest}}
+
+
+D1 = {"in": [1], "out": [2], "captain": 9, "chip": "none", "hits": 0}
+D2 = {"in": [3], "out": [2], "captain": 9, "chip": "none", "hits": 0}
+
+
+def test_first_recommendation_of_a_gameweek_is_sent():
+    from fpl.decide import _worth_sending
+
+    send, why = _worth_sending(None, "plan", D1)
+    assert send and "first" in why
+
+
+def test_identical_repeat_is_suppressed():
+    """The job runs hourly to catch team news, not to mail hourly. An unchanged
+    message every hour is one you learn to skim -- and then the one that matters
+    gets skimmed too."""
+    from fpl.decide import _worth_sending
+
+    send, why = _worth_sending(_prev("plan", D1), "plan", D1)
+    assert not send and "unchanged" in why
+
+
+def test_changed_advice_is_sent():
+    """The injury-news case the hourly schedule exists for."""
+    from fpl.decide import _worth_sending
+
+    send, why = _worth_sending(_prev("plan", D1), "plan", D2)
+    assert send and "changed" in why
+
+
+def test_final_is_sent_even_when_identical_to_the_plan():
+    """"Still this" the evening before a deadline is worth knowing."""
+    from fpl.decide import _worth_sending
+
+    send, why = _worth_sending(_prev("plan", D1), "final", D1)
+    assert send and "escalated" in why
+
+
+def test_captain_change_alone_triggers_a_send():
+    """Changing the armband is free and weekly, so it is a real instruction even
+    when no transfer is advised."""
+    from fpl.decide import _worth_sending
+
+    send, _ = _worth_sending(_prev("plan", D1), "plan", {**D1, "captain": 42})
+    assert send
+
+
+def test_digest_ignores_projection_drift(rules: Rules):
+    """Projections move a little every hour and the squad ordering moves with
+    them. None of that changes what you would do, so none of it should send."""
+    from fpl.project import Projection
+
+    pool = make_pool(95)
+    rec_a = build_for(pool, rules)
+    nudged = [
+        Projection(**{**p.__dict__, "by_gameweek": {gw: v * 1.001 for gw, v in p.by_gameweek.items()}})
+        for p in pool
+    ]
+    rec_b = build_for(nudged, rules)
+    assert rec_a.digest() == rec_b.digest()

@@ -652,3 +652,22 @@ def rival_captains(
         (event, exclude, exclude),
     ).fetchall()
     return {r["entry_id"]: r["element_id"] for r in rows}
+
+
+def last_notified(conn: psycopg.Connection, event: int) -> dict[str, Any] | None:
+    """The most recent recommendation actually sent for this gameweek.
+
+    Used to suppress repeats. The decide job runs hourly so that it can react to
+    team news without depending on a cron expression that would eventually fire
+    at the wrong time -- but running hourly and *sending* hourly are different
+    things, and conflating them turns a useful message into an ignored one.
+    """
+    row = conn.execute(
+        """
+        SELECT kind, payload FROM recommendations
+        WHERE event = %s AND notified_at IS NOT NULL
+        ORDER BY notified_at DESC LIMIT 1
+        """,
+        (event,),
+    ).fetchone()
+    return {"kind": row["kind"], "payload": row["payload"]} if row else None

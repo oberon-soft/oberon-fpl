@@ -152,7 +152,19 @@ def run(force: bool = False) -> int:
             recommendation.notes.append(standing_note)
 
         text = render(recommendation)
-        row_id = db.write_recommendation(conn, MODEL_VERSION, recommendation.to_payload())
+        payload = recommendation.to_payload()
+        row_id = db.write_recommendation(conn, MODEL_VERSION, payload)
+
+        # Run hourly, send rarely. The hourly schedule exists so the job can
+        # react to team news without a cron expression that would eventually
+        # fire at the wrong hour -- not so that it can mail you every hour.
+        should_send, reason = _worth_sending(
+            db.last_notified(conn, event), recommendation.kind, recommendation.digest()
+        )
+        if not should_send:
+            log.info("send_suppressed", gameweek=event, reason=reason)
+            print(text)
+            return 0
 
         delivered = notify.send(
             text,
@@ -167,6 +179,7 @@ def run(force: bool = False) -> int:
             gameweek=event,
             phase=str(state.phase),
             kind=recommendation.kind,
+            send_reason=reason,
             verdict=str(recommendation.verdict),
             hold=recommendation.is_hold,
             hits=recommendation.solution.hits,
@@ -206,3 +219,27 @@ def _standing(client, conn, event: int, boot) -> rivals.Standing | None:
 
     remaining = sum(1 for e in boot["events"] if e["id"] >= event)
     return rivals.standing_from_history(CONFIG.entry_id, histories, remaining)
+
+
+def _worth_sending(
+    previous: dict | None, kind: str, digest: dict
+) -> tuple[bool, str]:
+    """Whether this recommendation says anything the last one did not.
+
+    Three things earn a message. The first plan once the data settles. The final
+    confirmation before the deadline, which is sent even when identical, because
+    "still this" the evening before is worth knowing. And any change of advice in
+    between -- which is exactly the injury-news case the hourly schedule exists
+    to catch.
+
+    Everything else is silence. A recommendation that arrives unchanged every
+    hour is one you learn to skim, and then the one that matters gets skimmed
+    too.
+    """
+    if previous is None:
+        return True, "first recommendation for this gameweek"
+    if previous["kind"] != kind:
+        return True, f"escalated from {previous['kind']} to {kind}"
+    if previous["payload"].get("digest") != digest:
+        return True, "advice changed since the last message"
+    return False, "unchanged since the last message"

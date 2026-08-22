@@ -40,6 +40,23 @@ class Recommendation:
     def is_hold(self) -> bool:
         return not self.solution.transfers_in
 
+    def digest(self) -> dict[str, Any]:
+        """The decision-relevant subset, for deciding whether to send again.
+
+        Deliberately narrow: who to buy, who to sell, who to captain, which chip.
+        Projections drift a little every hour and the squad ordering shifts with
+        them, but none of that changes what you would do -- and a message that
+        arrives when nothing has changed teaches you to stop reading it.
+        """
+        captain = self.solution.captains.get(self.event)
+        return {
+            "in": sorted(p.element_id for p in self.solution.transfers_in),
+            "out": sorted(p.element_id for p in self.solution.transfers_out),
+            "captain": captain.element_id if captain else None,
+            "chip": str(self.solution.chip),
+            "hits": self.solution.hits,
+        }
+
     def to_payload(self) -> dict[str, Any]:
         """Structured form for the database. Kept separate from the rendered text
         so the record stays queryable rather than being a blob of prose."""
@@ -76,6 +93,7 @@ class Recommendation:
             "captains": {
                 str(gw): p.web_name for gw, p in sorted(self.solution.captains.items())
             },
+            "digest": self.digest(),
             "alternatives": [{"name": n, "delta": round(d, 3)} for n, d in self.alternatives],
             "notes": self.notes,
         }
