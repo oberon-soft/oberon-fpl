@@ -160,25 +160,30 @@ def solve(
     )
     pos = np.array([p.element_type for p in candidates])
     team = np.array([p.team_id for p in candidates])
-    horizon_ep = np.array([
-        sum(p.by_gameweek.get(gw, 0.0) for gw in gameweeks) / g for p in candidates
-    ])
     weekly_ep = np.array([
         [p.by_gameweek.get(gw, 0.0) for gw in gameweeks] for p in candidates
     ])
 
     total_budget = rules.budget if budget is None else budget
 
-    # Variables: x (in squad) | y (in XI) | z (captain, per gameweek) | h (hits)
-    x0, y0, z0 = 0, n, 2 * n
+    # Variables: x (in squad) | y (starting, per gameweek) | z (captain, per
+    # gameweek) | h (hits).
+    #
+    # The XI is indexed by gameweek because you re-pick it every week at no
+    # cost, so choosing one XI for a whole horizon optimises the wrong decision
+    # -- it will start a player whose team has no fixture this week on the
+    # strength of good fixtures later. It also lets the squad be valued the way
+    # it is actually used: a squad that rotates well is worth more than the sum
+    # of one fixed eleven.
+    x0, y0, z0 = 0, n, n + n * g
     h0 = z0 + n * g
     n_vars = h0 + (0 if unlimited else 1)
 
     objective = np.zeros(n_vars)
-    objective[x0:x0 + n] = bench_weight * horizon_ep
-    objective[y0:y0 + n] = (1 - bench_weight) * horizon_ep
-    # Captaincy adds the player's points a second (or third) time, averaged over
-    # the horizon to keep units consistent with the per-gameweek terms above.
+    # Starters score in full; a bench place is worth something but rarely much.
+    objective[y0:y0 + n * g] = ((1 - bench_weight) * weekly_ep / g).flatten()
+    objective[x0:x0 + n] = bench_weight * weekly_ep.mean(axis=1)
+    # Captaincy adds the player's points a second (or third) time.
     bonus = _captain_multiplier(chip) - 1
     objective[z0:z0 + n * g] = (weekly_ep * bonus / g).flatten()
 
@@ -190,7 +195,8 @@ def solve(
     # weight protects a lead, negative manufactures swing to chase one.
     if overlap and overlap_weight:
         share = np.array([overlap.get(p.element_id, 0.0) for p in candidates])
-        objective[y0:y0 + n] += overlap_weight * share
+        objective[x0:x0 + n] += overlap_weight * share
+
     if not unlimited:
         objective[h0] = -TRANSFER_COST
 
@@ -211,33 +217,40 @@ def solve(
         upper.append(hi)
         r += 1
 
+    def yi(i: int, k: int) -> int:
+        return y0 + i * g + k
+
+    def zi(i: int, k: int) -> int:
+        return z0 + i * g + k
+
     constrain([(x0 + i, 1.0) for i in range(n)], rules.squad_size, rules.squad_size)
     constrain([(x0 + i, cost[i]) for i in range(n)], 0, total_budget)
-    constrain([(y0 + i, 1.0) for i in range(n)], rules.starting_size, rules.starting_size)
 
     for element_type, quota in rules.squad_select.items():
         members = [i for i in range(n) if pos[i] == element_type]
         constrain([(x0 + i, 1.0) for i in members], quota, quota)
-        constrain(
-            [(y0 + i, 1.0) for i in members],
-            rules.play_min[element_type],
-            rules.play_max[element_type],
-        )
 
     for club in np.unique(team):
         members = [i for i in range(n) if team[i] == club]
         constrain([(x0 + i, 1.0) for i in members], 0, rules.team_limit)
 
-    # A starter must be owned.
-    for i in range(n):
-        constrain([(y0 + i, 1.0), (x0 + i, -1.0)], -np.inf, 0)
-
-    # Exactly one captain per gameweek, and only from the XI.
     for k in range(g):
-        constrain([(z0 + i * g + k, 1.0) for i in range(n)], 1, 1)
+        # A legal eleven every gameweek, not once across the horizon.
+        constrain([(yi(i, k), 1.0) for i in range(n)], rules.starting_size, rules.starting_size)
+        for element_type in rules.squad_select:
+            members = [i for i in range(n) if pos[i] == element_type]
+            constrain(
+                [(yi(i, k), 1.0) for i in members],
+                rules.play_min[element_type],
+                rules.play_max[element_type],
+            )
+        # Exactly one captain per gameweek.
+        constrain([(zi(i, k), 1.0) for i in range(n)], 1, 1)
+
     for i in range(n):
         for k in range(g):
-            constrain([(z0 + i * g + k, 1.0), (y0 + i, -1.0)], -np.inf, 0)
+            constrain([(yi(i, k), 1.0), (x0 + i, -1.0)], -np.inf, 0)   # start => own
+            constrain([(zi(i, k), 1.0), (yi(i, k), -1.0)], -np.inf, 0)  # captain => start
 
     if not unlimited:
         # hits >= (players bought) - free_transfers, and hits >= 0. Linearises
@@ -250,7 +263,7 @@ def solve(
     for element_id in force_include:
         matches = [i for i in range(n) if candidates[i].element_id == element_id]
         if matches:
-            constrain([(y0 + matches[0], 1.0)], 1, 1)
+            constrain([(x0 + matches[0], 1.0)], 1, 1)
 
     matrix = coo_matrix((vals, (rows, cols)), shape=(r, n_vars)).tocsr()
 
@@ -269,8 +282,12 @@ def solve(
         raise InfeasibleError(result.message)
 
     picked = result.x[x0:x0 + n] > 0.5
-    starting = result.x[y0:y0 + n] > 0.5
+    y = result.x[y0:y0 + n * g].reshape(n, g)
     z = result.x[z0:z0 + n * g].reshape(n, g)
+    # The XI reported is the one for the imminent gameweek -- the only one you
+    # are actually about to submit. Later gameweeks' elevens are solved for, so
+    # squad depth is valued correctly, but they are not decisions yet.
+    starting = y[:, 0] > 0.5
 
     squad = [candidates[i] for i in range(n) if picked[i]]
     xi = [candidates[i] for i in range(n) if starting[i]]

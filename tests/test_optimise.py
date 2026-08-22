@@ -294,7 +294,10 @@ def test_force_include_is_honoured(rules: Rules):
         key=lambda p: p.ep_horizon,
     )
     forced = solve(pool, rules, horizon=HORIZON, force_include=[outsider.element_id])
-    assert outsider.element_id in {p.element_id for p in forced.starting}
+    # Squad membership, not a start: the question is what owning them costs,
+    # and whether they are worth playing in any given week is a separate call
+    # the solver makes freshly each gameweek.
+    assert outsider.element_id in {p.element_id for p in forced.squad}
     assert forced.objective <= baseline.objective + 1e-6
 
 
@@ -345,3 +348,43 @@ def test_wildcard_gains_when_the_squad_has_drifted(rules: Rules):
         pool, rules, Chip.WILDCARD, horizon=HORIZON, current=current, free_transfers=1
     )
     assert gain > 0
+
+
+def test_xi_is_chosen_for_the_imminent_gameweek_not_the_horizon(rules: Rules):
+    """You re-pick the XI free every week, so choosing one eleven for six
+    gameweeks optimises the wrong decision. Before this was per-gameweek the
+    solver would start a player whose team has no fixture, on the strength of
+    good fixtures later."""
+    pool = make_pool(90)
+    blank = Projection(
+        code=777, element_id=777, element_type=3, web_name="BlankThisWeek",
+        team_id=19, now_cost=60, by_gameweek={HORIZON[0]: 0.0, HORIZON[1]: 9.0, HORIZON[2]: 9.0},
+    )
+    sol = solve(pool + [blank], rules, horizon=HORIZON)
+    assert blank.element_id in {p.element_id for p in sol.squad}, "worth owning for later"
+    assert blank.element_id not in {p.element_id for p in sol.starting}, "must not start a blank"
+
+
+def test_squad_depth_is_valued_because_elevens_rotate(rules: Rules):
+    """Solving an eleven per gameweek is not only about this week. It lets the
+    squad be valued the way it is used -- fifteen players covering six weeks of
+    rotating fixtures, rather than one fixed eleven plus dead weight."""
+    pool = make_pool(91)
+    # Two players who alternate: each blanks when the other plays.
+    alt = [
+        Projection(code=800 + i, element_id=800 + i, element_type=3,
+                   web_name=f"Alt{i}", team_id=18 + i, now_cost=55,
+                   by_gameweek={gw: (8.0 if (n % 2 == i) else 0.0)
+                                for n, gw in enumerate(HORIZON)})
+        for i in range(2)
+    ]
+    sol = solve(pool + alt, rules, horizon=HORIZON)
+    owned = {p.element_id for p in sol.squad}
+    # Together they cover every gameweek, so a horizon-aware solve wants both.
+    assert len(owned & {800, 801}) == 2
+
+
+def test_captain_still_comes_from_that_week_s_eleven(rules: Rules):
+    sol = solve(make_pool(92), rules, horizon=HORIZON)
+    first = HORIZON[0]
+    assert sol.captains[first].element_id in {p.element_id for p in sol.starting}
