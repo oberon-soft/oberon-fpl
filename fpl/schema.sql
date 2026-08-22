@@ -245,3 +245,18 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS events_type_occurred_idx
     ON events (event_type, occurred_at DESC);
+
+
+-- Additive migrations.
+--
+-- `CREATE TABLE IF NOT EXISTS` is not a migration system. It does nothing at
+-- all when the table already exists, so a column added to a definition above
+-- reaches a fresh database and never reaches an existing one. That failed
+-- silently: local development kept dropping and recreating tables, so the
+-- schema was always current there, while the cluster ran for two days against a
+-- `projections` table with no `imputed` column and every plan job died on it.
+--
+-- Any column added after a table's first release belongs here as well as in the
+-- definition above. `ADD COLUMN IF NOT EXISTS` is idempotent, so both paths
+-- converge: new databases get it from the CREATE, existing ones from the ALTER.
+ALTER TABLE projections ADD COLUMN IF NOT EXISTS imputed BOOLEAN NOT NULL DEFAULT false;

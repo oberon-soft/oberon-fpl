@@ -43,10 +43,80 @@ def connect(url: str | None = None) -> Iterator[psycopg.Connection]:
 
 
 def migrate(conn: psycopg.Connection) -> None:
-    """Apply schema.sql. Every statement is IF NOT EXISTS, so this is idempotent
-    and safe to run at the start of any job."""
+    """Apply schema.sql and verify the result matches it.
+
+    Every statement is idempotent, so this is safe at the start of any job.
+
+    The verification exists because idempotence is not sufficiency:
+    `CREATE TABLE IF NOT EXISTS` does nothing when the table is already there,
+    so a column added to a definition reaches new databases and silently skips
+    existing ones. That drift is invisible until something writes the column,
+    and then it surfaces as UndefinedColumn from deep inside an executemany --
+    hours later, in a scheduled job, with no obvious connection to the deploy
+    that caused it. Failing here instead says exactly what is missing.
+    """
     sql = resources.files("fpl").joinpath("schema.sql").read_text()
     conn.execute(sql)
+
+    drift = schema_drift(expected_columns(sql), live_columns(conn))
+    if drift:
+        detail = "; ".join(f"{t}: {sorted(c)}" for t, c in sorted(drift.items()))
+        raise RuntimeError(
+            f"schema drift after migrate -- {detail}. "
+            "Add an `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` to schema.sql: "
+            "CREATE TABLE IF NOT EXISTS will not add a column to a table that "
+            "already exists."
+        )
+
+
+def expected_columns(sql: str) -> dict[str, set[str]]:
+    """Columns each CREATE TABLE in schema.sql declares."""
+    import re
+
+    out: dict[str, set[str]] = {}
+    for match in re.finditer(r"CREATE TABLE IF NOT EXISTS (\w+)\s*\((.*?)\n\);", sql, re.S):
+        table, body = match.group(1), match.group(2)
+        columns: set[str] = set()
+        for line in body.splitlines():
+            line = line.strip()
+            if not line or line.startswith("--"):
+                continue
+            if line.upper().startswith(("PRIMARY KEY", "CONSTRAINT", "UNIQUE", "FOREIGN", "CHECK")):
+                continue
+            name = line.split()[0]
+            if name.isidentifier():
+                columns.add(name)
+        out[table] = columns
+    return out
+
+
+def live_columns(conn: psycopg.Connection) -> dict[str, set[str]]:
+    rows = conn.execute(
+        """
+        SELECT table_name, column_name FROM information_schema.columns
+        WHERE table_schema = 'public'
+        """
+    ).fetchall()
+    out: dict[str, set[str]] = {}
+    for r in rows:
+        out.setdefault(r["table_name"], set()).add(r["column_name"])
+    return out
+
+
+def schema_drift(
+    expected: dict[str, set[str]], live: dict[str, set[str]]
+) -> dict[str, set[str]]:
+    """Columns schema.sql declares that the database does not have.
+
+    One-directional on purpose. Extra columns in the database are harmless
+    leftovers from a removed feature; missing ones break writes.
+    """
+    drift: dict[str, set[str]] = {}
+    for table, columns in expected.items():
+        missing = columns - live.get(table, set())
+        if missing:
+            drift[table] = missing
+    return drift
 
 
 # -- freshness ------------------------------------------------------------
