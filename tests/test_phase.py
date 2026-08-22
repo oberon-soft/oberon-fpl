@@ -99,3 +99,23 @@ def test_real_payload_parses(bootstrap):
     state = derive_phase(bootstrap["events"])
     assert state.phase in set(Phase)
     assert state.next_gameweek is None or 1 <= state.next_gameweek <= 38
+
+
+def test_preseason_means_no_football_played_not_no_stats_settled():
+    """These diverge for several days every gameweek. During GW1, with matches
+    under way, no gameweek has settled -- but calling that preseason is wrong,
+    and the freshness tolerances are indexed by phase, so the wrong label
+    relaxes the wrong checks."""
+    events = [
+        event(1, NOW - timedelta(hours=6), is_current=True),   # kicked off, not finished
+        event(2, NOW + timedelta(days=6)),
+    ]
+    state = derive_phase(events, now=NOW)
+    assert state.last_settled_gameweek is None
+    assert state.phase is not Phase.PRESEASON
+    assert state.phase is Phase.PLANNING
+
+
+def test_still_preseason_before_the_very_first_deadline():
+    events = [event(1, NOW + timedelta(days=5)), event(2, NOW + timedelta(days=12))]
+    assert derive_phase(events, now=NOW).phase is Phase.PRESEASON

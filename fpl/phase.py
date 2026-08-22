@@ -26,7 +26,7 @@ PRE_DEADLINE_HOURS = 3
 
 class Phase(StrEnum):
     PRESEASON = "PRESEASON"
-    """No gameweek has finished. Prior-season priors are all there is."""
+    """No gameweek has kicked off yet. Prior-season priors are all there is."""
 
     SETTLING = "SETTLING"
     """Matches played, stats not yet final. Do not refit on partial data."""
@@ -76,6 +76,7 @@ def derive_phase(events: list[dict[str, Any]], now: datetime | None = None) -> P
     settled = [e["id"] for e in events if e.get("finished") and e.get("data_checked")]
     last_settled = max(settled) if settled else None
 
+    started = any(_parse(e["deadline_time"]) <= now for e in events)
     current = next((e for e in events if e.get("is_current")), None)
     upcoming = sorted(
         (e for e in events if _parse(e["deadline_time"]) > now),
@@ -113,6 +114,11 @@ def derive_phase(events: list[dict[str, Any]], now: datetime | None = None) -> P
         return state(Phase.PRE_DEADLINE)
     if hours <= NEWS_WINDOW_HOURS:
         return state(Phase.NEWS_WINDOW)
-    if last_settled is None:
+    # Preseason means no football has been played, not merely that no stats
+    # have been finalised. Those diverge for several days every gameweek --
+    # during GW1 in particular, when matches are under way, `last_settled` is
+    # still None and calling that "preseason" is simply wrong. The tolerance
+    # table is indexed by phase, so a misleading label relaxes the wrong checks.
+    if not started:
         return state(Phase.PRESEASON)
     return state(Phase.PLANNING)
