@@ -597,3 +597,58 @@ def write_reconciliation(
         (entry_id, event, rec.reported_value, rec.market_total,
          rec.selling_total, str(rec.semantics), rec.agrees),
     )
+
+
+# -- rivals ---------------------------------------------------------------
+
+
+def upsert_entries(
+    conn: psycopg.Connection, members: dict[int, str], self_id: int | None = None
+) -> int:
+    """Record league members by id and team name.
+
+    Manager names are never stored -- see the `entries` table comment. The model
+    needs ids and picks; a name only ever reaches a line of text you read.
+    """
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO entries (entry_id, entry_name, is_self)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (entry_id) DO UPDATE SET
+                entry_name = EXCLUDED.entry_name,
+                last_seen = now()
+            """,
+            [(e, name, e == self_id) for e, name in members.items()],
+        )
+    return len(members)
+
+
+def rival_picks(
+    conn: psycopg.Connection, event: int, exclude: int | None = None
+) -> dict[int, list[int]]:
+    """Every recorded squad for a gameweek, keyed by entry."""
+    rows = conn.execute(
+        """
+        SELECT entry_id, element_id FROM entry_picks
+        WHERE event = %s AND (%s::int IS NULL OR entry_id <> %s)
+        """,
+        (event, exclude, exclude),
+    ).fetchall()
+    out: dict[int, list[int]] = {}
+    for r in rows:
+        out.setdefault(r["entry_id"], []).append(r["element_id"])
+    return out
+
+
+def rival_captains(
+    conn: psycopg.Connection, event: int, exclude: int | None = None
+) -> dict[int, int]:
+    rows = conn.execute(
+        """
+        SELECT entry_id, element_id FROM entry_picks
+        WHERE event = %s AND is_captain AND (%s::int IS NULL OR entry_id <> %s)
+        """,
+        (event, exclude, exclude),
+    ).fetchall()
+    return {r["entry_id"]: r["element_id"] for r in rows}

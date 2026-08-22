@@ -17,7 +17,7 @@ from dataclasses import replace
 
 import structlog
 
-from fpl import db, holdings, notify
+from fpl import db, holdings, notify, rivals
 from fpl.client import FPLClient, FPLError
 from fpl.config import CONFIG, MODEL_VERSION
 from fpl.entry import load_squad
@@ -116,6 +116,24 @@ def run(force: bool = False) -> int:
                         held, {e["id"]: e["now_cost"] for e in boot["elements"]}
                     )
 
+        # League-relative tilt. Ownership cannot change the mean-optimal squad
+        # -- the field's expected score does not depend on your choices -- so
+        # this is purely a variance instrument, and it stays inert until the
+        # standing and the calendar both say variance is worth buying.
+        overlap: dict[int, float] = {}
+        overlap_weight = 0.0
+        standing_note = None
+        if CONFIG.league_id and CONFIG.entry_id and event > 1:
+            picks = db.rival_picks(conn, event - 1, exclude=CONFIG.entry_id)
+            if picks:
+                overlap = rivals.ownership(
+                    picks, [p.element_id for p in candidates]
+                )
+                standing = _standing(client, conn, event, boot)
+                if standing:
+                    overlap_weight = rivals.overlap_weight(standing)
+                    standing_note = rivals.describe(standing, overlap_weight)
+
         recommendation = build(
             candidates,
             rules,
@@ -127,7 +145,11 @@ def run(force: bool = False) -> int:
             teams={t["id"]: t["short_name"] for t in boot["teams"]},
             current=current,
             costs=costs,
+            overlap=overlap,
+            overlap_weight=overlap_weight,
         )
+        if standing_note:
+            recommendation.notes.append(standing_note)
 
         text = render(recommendation)
         row_id = db.write_recommendation(conn, MODEL_VERSION, recommendation.to_payload())
@@ -162,3 +184,25 @@ def _latest_season(conn) -> str:
         """
     ).fetchone()
     return row["season_name"] if row else "__none__"
+
+
+def _standing(client, conn, event: int, boot) -> rivals.Standing | None:
+    """Everyone's points total, for the league-relative tilt.
+
+    One call per member. Failures degrade to no tilt rather than no
+    recommendation -- the points-maximising squad is the correct default, so
+    losing this input costs nothing but the variance adjustment.
+    """
+    members = conn.execute("SELECT entry_id FROM entries").fetchall()
+    if not members:
+        return None
+
+    histories: dict[int, dict] = {}
+    for row in members:
+        try:
+            histories[row["entry_id"]] = client.entry_history(row["entry_id"])
+        except FPLError:
+            continue
+
+    remaining = sum(1 for e in boot["events"] if e["id"] >= event)
+    return rivals.standing_from_history(CONFIG.entry_id, histories, remaining)

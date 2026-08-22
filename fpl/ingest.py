@@ -61,6 +61,7 @@ def run() -> int:
         # a few hours after a deadline -- rather than waiting for a phase the
         # decide job happens to consider actionable.
         synced = _sync_own_squad(conn, client, boot, state)
+        rivals = _sync_rivals(conn, client, boot, state)
 
         db.log_event(
             conn,
@@ -72,6 +73,7 @@ def run() -> int:
                 "next_gameweek": state.next_gameweek,
                 "informative": informative,
                 "holdings_synced": synced,
+                "rival_squads": rivals,
             },
         )
 
@@ -83,6 +85,7 @@ def run() -> int:
             next_gameweek=state.next_gameweek,
             informative=informative,
             holdings_synced=synced,
+            rival_squads=rivals,
         )
     return 0
 
@@ -130,3 +133,44 @@ def _sync_own_squad(conn, client, boot, state) -> bool:
     )
     db.record_freshness(conn, Source.OWN_SQUAD, Status.FRESH)
     return True
+
+
+def _sync_rivals(conn, client, boot, state) -> int:
+    """Record every league member's confirmed squad.
+
+    Cheap -- one call per member per gameweek -- and unlike prices this data does
+    not evaporate: past picks stay retrievable, so a missed run backfills. It is
+    fetched daily anyway because the alternative is remembering to.
+
+    Only ids and team names are stored. The endpoint also returns each manager's
+    real name and there is no reason for this system to hold it.
+    """
+    if not (CONFIG.league_id and state.next_gameweek):
+        return 0
+    latest = state.next_gameweek - 1
+    if latest < 1:
+        return 0
+
+    try:
+        members = client.league_members(CONFIG.league_id)
+    except FPLError as exc:
+        log.warning("league_fetch_failed", error=str(exc))
+        return 0
+    if not members:
+        return 0
+
+    db.upsert_entries(conn, members, self_id=CONFIG.entry_id)
+
+    stored = 0
+    for entry_id in members:
+        if entry_id == CONFIG.entry_id:
+            continue  # already recorded, with purchase prices, by _sync_own_squad
+        try:
+            picks = client.entry_picks(entry_id, latest)
+        except FPLError:
+            continue
+        db.write_entry_picks(conn, entry_id, latest, picks["picks"])
+        stored += 1
+
+    log.info("rivals_synced", members=len(members), squads=stored, gameweek=latest)
+    return stored

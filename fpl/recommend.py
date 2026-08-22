@@ -132,6 +132,8 @@ def build(
     current: Squad | None = None,
     chip: Chip = Chip.NONE,
     costs: dict[int, int] | None = None,
+    overlap: dict[int, float] | None = None,
+    overlap_weight: float = 0.0,
 ) -> Recommendation:
     current_ids = current.element_ids if current else []
     free_transfers = current.free_transfers if current else 1
@@ -140,6 +142,7 @@ def build(
     solution = solve(
         candidates, rules, horizon=horizon, current=current_ids,
         free_transfers=free_transfers, budget=budget, chip=chip, costs=costs,
+        overlap=overlap, overlap_weight=overlap_weight,
     )
 
     alternatives = _alternatives(

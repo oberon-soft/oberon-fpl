@@ -119,6 +119,8 @@ def solve(
     chip: Chip = Chip.NONE,
     force_include: Iterable[int] = (),
     costs: dict[int, int] | None = None,
+    overlap: dict[int, float] | None = None,
+    overlap_weight: float = 0.0,
 ) -> Solution:
     """Best squad under the rules.
 
@@ -179,6 +181,16 @@ def solve(
     # the horizon to keep units consistent with the per-gameweek terms above.
     bonus = _captain_multiplier(chip) - 1
     objective[z0:z0 + n * g] = (weekly_ep * bonus / g).flatten()
+
+    # Overlap with rivals is a variance dial, not a points dial. By linearity
+    # of expectation the field's expected score does not depend on your
+    # choices, so ownership cannot move the mean-optimal squad -- but players
+    # you share with a rival cancel out of the difference between your scores,
+    # so overlap is exactly what governs how far apart you can drift. Positive
+    # weight protects a lead, negative manufactures swing to chase one.
+    if overlap and overlap_weight:
+        share = np.array([overlap.get(p.element_id, 0.0) for p in candidates])
+        objective[y0:y0 + n] += overlap_weight * share
     if not unlimited:
         objective[h0] = -TRANSFER_COST
 
